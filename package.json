@@ -1,0 +1,55 @@
+{
+  "name": "pick-cn",
+  "version": "1.0.0",
+  "description": "A command line tool to translate Chinese text to English and generate JSON mapping files",
+  "main": "dist/src/index.js",
+  "bin": {
+    "pick-cn": "./dist/bin/cli.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "node build.js",
+    "dev": "node bin/cli.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "chinese",
+    "english",
+    "translation",
+    "cli",
+    "json",
+    "i18n",
+    "localization",
+    "baidu-translate",
+    "google-translate",
+    "youdao-translate"
+  ],
+  "author": "jiankechen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jiankechen/pick-cn.git"
+  },
+  "homepage": "https://github.com/jiankechen/pick-cn#readme",
+  "bugs": {
+    "url": "https://github.com/jiankechen/pick-cn/issues"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "api-config.example.json"
+  ],
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.11.0",
+    "commander": "^9.4.1",
+    "crypto": "^1.0.1",
+    "crypto-js": "^4.2.0",
+    "fs-extra": "^11.1.0",
+    "glob": "^8.1.0",
+    "querystring": "^0.2.1"
+  }
+}

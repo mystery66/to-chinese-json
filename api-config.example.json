@@ -1,0 +1,13 @@
+{
+  "baidu": {
+    "appId": "your_baidu_app_id",
+    "secretKey": "your_baidu_secret_key"
+  },
+  "youdao": {
+    "appKey": "your_youdao_app_key",
+    "appSecret": "your_youdao_app_secret"
+  },
+  "google": {
+    "apiKey": "your_google_api_key"
+  }
+}
