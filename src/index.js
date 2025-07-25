@@ -1,6 +1,7 @@
 const fs = require('fs-extra');
 const path = require('path');
 const glob = require('glob');
+const { Project, SyntaxKind } = require('ts-morph');
 const { TranslationManager } = require('./translators');
 
 /**
@@ -14,12 +15,15 @@ const { TranslationManager } = require('./translators');
  */
 async function execute(options) {
   try {
-    const { source, target, output, translator, apiConfig } = options;
+    const { source, target, output, translator, apiConfig, untranslated } = options;
     
     console.log(`📂 源目录: ${source}`);
     console.log(`📁 目标目录: ${target || source}`);
     console.log(`📄 输出文件: ${output}`);
-    console.log(`🌐 翻译服务: ${translator}`);
+    console.log(`🌐 翻译模式: ${untranslated ? '未翻译（占位符）' : '已翻译'}`);
+    if (!untranslated) {
+      console.log(`🌐 翻译服务: ${translator}`);
+    }
     
     // 加载 API 配置（自动查找并合并配置文件）
     await loadApiConfig(source, apiConfig);
@@ -42,7 +46,7 @@ async function execute(options) {
     console.log(`✨ 去重后剩余 ${uniqueTexts.length} 个唯一中文文本（减少 ${chineseTexts.size - uniqueTexts.length} 个重复项）`);
     
     // 生成中英文映射 JSON
-    const mapping = await generateMapping(uniqueTexts, translator);
+    const mapping = await generateMapping(uniqueTexts, translator, !untranslated);
     
     // 保存 JSON 文件
     const outputPath = path.join(target || source, output);
@@ -89,119 +93,212 @@ async function findSourceFiles(sourcePath) {
 }
 
 /**
- * 从文件中提取中文文本
+ * 检查字符串字面量是否作为 key 使用（对象属性名或枚举成员名）
+ * @param {Node} node - 字符串字面量节点
+ * @returns {boolean} 是否作为 key 使用
+ */
+function isStringLiteralAsKey(node) {
+  const parent = node.getParent();
+  if (!parent) return false;
+  
+  const parentKind = parent.getKind();
+  
+  // 检查是否为对象属性的 key
+  if (parentKind === SyntaxKind.PropertyAssignment) {
+    try {
+      // 检查当前节点是否是属性名（而不是属性值）
+      const nameNode = parent.getNameNode();
+      return nameNode === node;
+    } catch (e) {
+      // 如果获取名称节点失败，检查节点位置
+      const children = parent.getChildren();
+      return children.length > 0 && children[0] === node;
+    }
+  }
+  
+  // 检查是否为枚举成员的 key
+  if (parentKind === SyntaxKind.EnumMember) {
+    try {
+      // 检查当前节点是否是枚举成员名（而不是枚举成员值）
+      const nameNode = parent.getNameNode();
+      return nameNode === node;
+    } catch (e) {
+      // 如果获取名称节点失败，检查节点位置
+      const children = parent.getChildren();
+      return children.length > 0 && children[0] === node;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * 检查节点是否在 console 语句中
+ * @param {Node} node - AST 节点
+ * @returns {boolean} 是否在 console 语句中
+ */
+function isInConsoleStatement(node) {
+  let current = node;
+  let depth = 0;
+  const maxDepth = 3; // 限制检查深度，避免过度向上遍历
+  
+  // 向上检查有限的父节点
+  while (current && depth < maxDepth) {
+    const kind = current.getKind();
+    
+    // 如果是调用表达式，检查是否是 console 调用
+    if (kind === SyntaxKind.CallExpression) {
+      const expression = current.getExpression();
+      
+      // 检查是否是属性访问表达式 (console.xxx)
+      if (expression && expression.getKind() === SyntaxKind.PropertyAccessExpression) {
+        const objectName = expression.getExpression();
+        const propertyName = expression.getName();
+        
+        // 检查对象名是否是 'console' 且属性名是 console 方法
+        if (objectName && objectName.getText().trim() === 'console' &&
+            /^(log|warn|error|info|debug|trace)$/.test(propertyName)) {
+          return true;
+        }
+      }
+    }
+    
+    // 如果是表达式语句，检查其直接子节点是否是 console 调用
+    else if (kind === SyntaxKind.ExpressionStatement) {
+      const expression = current.getExpression();
+      if (expression && expression.getKind() === SyntaxKind.CallExpression) {
+        const callExpression = expression.getExpression();
+        
+        if (callExpression && callExpression.getKind() === SyntaxKind.PropertyAccessExpression) {
+          const objectName = callExpression.getExpression();
+          const propertyName = callExpression.getName();
+          
+          if (objectName && objectName.getText().trim() === 'console' &&
+              /^(log|warn|error|info|debug|trace)$/.test(propertyName)) {
+            return true;
+          }
+        }
+      }
+    }
+    
+    current = current.getParent();
+    depth++;
+  }
+  
+  return false;
+}
+
+/**
+ * 从文件中提取中文文本（使用 TypeScript AST 遍历）
  * @param {string} filePath - 文件路径
  * @returns {Promise<string[]>} 中文文本数组
  */
 async function extractChineseFromFile(filePath) {
   try {
-    const content = await fs.readFile(filePath, 'utf-8');
     const chineseTexts = [];
     
-    // 1. 提取 TypeScript 枚举定义中的中文 key
-    const enumKeyRegex = /enum\s+\w+\s*\{[^}]*?'([^']*[\u4e00-\u9fff][^']*)'\s*[=,}]/g;
-    let match;
-    while ((match = enumKeyRegex.exec(content)) !== null) {
-      const text = match[1].trim();
-      if (isValidChineseText(text)) {
-        chineseTexts.push(text);
+    // 创建 TypeScript 项目实例
+    const project = new Project({
+      useInMemoryFileSystem: true,
+      compilerOptions: {
+        allowJs: true,
+        allowSyntheticDefaultImports: true,
+        esModuleInterop: true,
+        jsx: 'preserve',
+        target: 'ES2020',
+        module: 'ESNext'
       }
-    }
+    });
     
-    // 2. 提取普通字符串字面量中的中文（排除枚举使用处）
-    const lines = content.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      
-      // 跳过枚举使用的行（如 key: EnumType.中文key）
-      if (isEnumUsageLine(line)) {
-        continue;
+    // 读取文件内容并添加到项目中
+    const content = await fs.readFile(filePath, 'utf-8');
+    const sourceFile = project.createSourceFile(filePath, content);
+    
+    // 遍历 AST 节点，提取字符串字面量中的中文
+    sourceFile.forEachDescendant((node) => {
+      // 检查节点是否在 console 语句中，如果是则跳过
+      if (isInConsoleStatement(node)) {
+        // console.log(`跳过 console 语句中的文本: ${node.getText()}`);
+        return;
       }
       
-      // 提取该行中的中文字符串
-      const lineTexts = extractChineseFromLine(line);
-      chineseTexts.push(...lineTexts);
-    }
+      // 处理字符串字面量 (StringLiteral)
+      if (node.getKind() === SyntaxKind.StringLiteral) {
+        // 检查是否为对象属性名或枚举成员名（key）
+        if (isStringLiteralAsKey(node)) {
+          return; // 跳过 key，不提取
+        }
+        
+        const text = node.getLiteralValue();
+        if (isValidChineseText(text)) {
+          chineseTexts.push(text);
+        }
+      }
+      
+      // 处理模板字符串 (TemplateExpression)
+      else if (node.getKind() === SyntaxKind.TemplateExpression) {
+        // 获取模板字符串的所有文本部分
+        const templateSpans = node.getTemplateSpans();
+        const head = node.getHead();
+        
+        // 检查头部文本
+        const headText = head.getLiteralValue();
+        if (isValidChineseText(headText)) {
+          chineseTexts.push(headText);
+        }
+        
+        // 检查每个模板片段的文本部分
+        templateSpans.forEach(span => {
+          const literal = span.getLiteral();
+          const spanText = literal.getLiteralValue();
+          if (isValidChineseText(spanText)) {
+            chineseTexts.push(spanText);
+          }
+        });
+      }
+      
+      // 处理无模板字符串 (NoSubstitutionTemplateLiteral)
+      else if (node.getKind() === SyntaxKind.NoSubstitutionTemplateLiteral) {
+        const text = node.getLiteralValue();
+        if (isValidChineseText(text)) {
+          chineseTexts.push(text);
+        }
+      }
+      
+      // 处理 JSX 文本 (JsxText)
+      else if (node.getKind() === SyntaxKind.JsxText) {
+        const text = node.getText().trim();
+        if (isValidChineseText(text)) {
+          chineseTexts.push(text);
+        }
+      }
+      
+      // 处理 JSX 属性中的字符串 (JsxAttribute)
+      else if (node.getKind() === SyntaxKind.JsxAttribute) {
+        const initializer = node.getInitializer();
+        if (initializer && initializer.getKind() === SyntaxKind.StringLiteral) {
+          const text = initializer.getLiteralValue();
+          if (isValidChineseText(text)) {
+            chineseTexts.push(text);
+          }
+        }
+      }
+      
+      // 注意：不再单独处理 PropertyAssignment 和 EnumMember
+      // 因为它们的 value 会被 StringLiteral 处理逻辑捕获
+      // 而 key 会被 isStringLiteralAsKey 过滤掉
+    });
     
-    return [...new Set(chineseTexts)]; // 去重
+    console.log(`📄 ${path.basename(filePath)}: 提取到 ${chineseTexts.length} 个中文文本`);
+    return chineseTexts;
+    
   } catch (error) {
-    console.warn(`⚠️  读取文件失败: ${filePath}`, error.message);
+    console.warn(`⚠️  处理文件失败: ${filePath}`, error.message);
     return [];
   }
 }
 
-/**
- * 检查是否为枚举使用的行
- * @param {string} line - 代码行
- * @returns {boolean} 是否为枚举使用行
- */
-function isEnumUsageLine(line) {
-  // 匹配 key: EnumType.中文 或 EnumType.中文 这样的模式
-  const enumUsagePatterns = [
-    /\w+\.[\u4e00-\u9fff]/,  // EnumType.中文
-    /key:\s*\w+\.[\u4e00-\u9fff]/, // key: EnumType.中文
-  ];
-  
-  return enumUsagePatterns.some(pattern => pattern.test(line));
-}
 
-/**
- * 从单行代码中提取中文文本
- * @param {string} line - 代码行
- * @returns {string[]} 中文文本数组
- */
-function extractChineseFromLine(line) {
-  const texts = [];
-  
-  // 匹配单引号字符串中的中文
-  const singleQuoteRegex = /'([^']*[\u4e00-\u9fff][^']*)'/g;
-  // 匹配双引号字符串中的中文
-  const doubleQuoteRegex = /"([^"]*[\u4e00-\u9fff][^"]*)"/g;
-  // 匹配模板字符串中的中文
-  const templateRegex = /`([^`]*[\u4e00-\u9fff][^`]*)`/g;
-  
-  let match;
-  
-  // 提取单引号中的中文
-  while ((match = singleQuoteRegex.exec(line)) !== null) {
-    const text = match[1].trim();
-    if (isValidChineseText(text)) {
-      texts.push(text);
-    }
-  }
-  
-  // 提取双引号中的中文
-  while ((match = doubleQuoteRegex.exec(line)) !== null) {
-    const text = match[1].trim();
-    if (isValidChineseText(text)) {
-      texts.push(text);
-    }
-  }
-  
-  // 提取模板字符串中的中文
-  while ((match = templateRegex.exec(line)) !== null) {
-    const templateContent = match[1];
-    
-    // 如果模板字符串不包含表达式，直接处理
-    if (!templateContent.includes('${')) {
-      const text = templateContent.trim();
-      if (isValidChineseText(text)) {
-        texts.push(text);
-      }
-    } else {
-      // 如果包含表达式，提取被${}分割的中文片段
-      const segments = templateContent.split(/\$\{[^}]*\}/);
-      for (const segment of segments) {
-        const text = segment.trim();
-        if (text && isValidChineseText(text)) {
-          texts.push(text);
-        }
-      }
-    }
-  }
-  
-  return texts;
-}
 
 /**
  * 检查文本是否包含中文
@@ -387,9 +484,21 @@ async function loadApiConfig(sourcePath, customConfigPath) {
  * 生成中英文映射
  * @param {string[]} chineseTexts - 中文文本数组
  * @param {string} translatorService - 翻译服务名称
+ * @param {boolean} shouldTranslate - 是否进行翻译（false时使用占位符）
  * @returns {Promise<Object>} 中英文映射对象
  */
-async function generateMapping(chineseTexts, translatorService = 'baidu') {
+async function generateMapping(chineseTexts, translatorService = 'baidu', shouldTranslate = true) {
+  // 如果不需要翻译，直接返回占位符映射
+  if (!shouldTranslate) {
+    console.log('📝 生成未翻译映射（使用占位符）...');
+    const mapping = {};
+    for (const chineseText of chineseTexts) {
+      mapping[chineseText] = 'to do translate';
+      console.log(`📝 ${chineseText} -> to do translate`);
+    }
+    return mapping;
+  }
+  
   console.log('🌐 初始化翻译服务...');
   
   const translationManager = new TranslationManager();
