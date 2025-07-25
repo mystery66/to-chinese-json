@@ -2,13 +2,14 @@
 
 const { Command } = require('commander');
 const { execute } = require('../src/index');
+const packageJson = require('../package.json');
 
 const program = new Command();
 
 program
   .name('chinese-to-english')
   .description('A command line tool to translate Chinese text to English and generate JSON mapping files')
-  .version('1.0.0');
+  .version(packageJson.version);
 
 program
   .command('execute')

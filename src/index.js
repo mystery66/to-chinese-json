@@ -71,21 +71,22 @@ async function findSourceFiles(sourcePath) {
   ];
   
   const files = [];
-  for (const pattern of patterns) {
-    // 首先扫描 src 目录（主要代码目录）
-    const srcMatches = glob.sync(path.join(sourcePath, 'src', pattern), {
-      ignore: ['**/node_modules/**', '**/dist/**', '**/*.min.js']
-    });
-    files.push(...srcMatches);
-    
-    // 如果没有 src 目录或者需要扫描整个目录，则扫描整个指定目录
-    const allMatches = glob.sync(path.join(sourcePath, pattern), {
-      ignore: ['**/node_modules/**', '**/dist/**', '**/*.min.js', '**/src/**'] // 排除 src 目录避免重复
-    });
-    files.push(...allMatches);
+  
+  // 检查指定路径是否存在
+  if (!await fs.pathExists(sourcePath)) {
+    console.warn(`⚠️  指定的源目录不存在: ${sourcePath}`);
+    return files;
   }
   
-  return files;
+  for (const pattern of patterns) {
+    // 直接在指定目录中查找文件
+    const matches = glob.sync(path.join(sourcePath, pattern), {
+      ignore: ['**/node_modules/**', '**/dist/**', '**/*.min.js']
+    });
+    files.push(...matches);
+  }
+  
+  return [...new Set(files)]; // 去重
 }
 
 /**
@@ -98,13 +99,18 @@ async function extractChineseFromFile(filePath) {
     const content = await fs.readFile(filePath, 'utf-8');
     const chineseTexts = [];
     
-    // 1. 提取 TypeScript 枚举定义中的中文 key
-    const enumKeyRegex = /enum\s+\w+\s*\{[^}]*?'([^']*[\u4e00-\u9fff][^']*)'\s*[=,}]/g;
+    // 1. 提取 TypeScript 枚举定义中的中文 value（不处理中文 key）
+    // 匹配格式: KEY = '中文值' 或 KEY = "中文值" 或 KEY = `中文值`
+    const enumValueRegex = /\w+\s*=\s*(['"`])([^'"`)]*[\u4e00-\u9fff][^'"`)]*?)\1/g;
     let match;
-    while ((match = enumKeyRegex.exec(content)) !== null) {
-      const text = match[1].trim();
-      if (isValidChineseText(text)) {
-        chineseTexts.push(text);
+    while ((match = enumValueRegex.exec(content)) !== null) {
+      const rawText = match[2].trim(); // match[2] 是第二个捕获组（中文内容）
+      const cleanedSegments = cleanChineseText(rawText); // 清理并分割成多个中文片段
+      // 将每个有效的中文片段添加到结果中
+      for (const segment of cleanedSegments) {
+        if (segment && isValidChineseText(segment)) {
+          chineseTexts.push(segment);
+        }
       }
     }
     
@@ -146,12 +152,43 @@ function isEnumUsageLine(line) {
 }
 
 /**
+ * 检查是否为 console.log 相关的行
+ * @param {string} line - 代码行
+ * @returns {boolean} 是否为 console.log 相关行
+ */
+function isConsoleLogLine(line) {
+  // 去除行首空白字符进行检查
+  const trimmedLine = line.trim();
+  
+  // 匹配各种 console 方法调用
+  const consolePatterns = [
+    /^console\.log\s*\(/,     // console.log(
+    /^console\.warn\s*\(/,    // console.warn(
+    /^console\.error\s*\(/,   // console.error(
+    /^console\.info\s*\(/,    // console.info(
+    /^console\.debug\s*\(/,   // console.debug(
+    /^console\.trace\s*\(/,   // console.trace(
+    /^console\.table\s*\(/,   // console.table(
+    /^console\.dir\s*\(/,     // console.dir(
+    /^console\.group\s*\(/,   // console.group(
+    /^console\.groupEnd\s*\(/,// console.groupEnd(
+  ];
+  
+  return consolePatterns.some(pattern => pattern.test(trimmedLine));
+}
+
+/**
  * 从单行代码中提取中文文本
  * @param {string} line - 代码行
  * @returns {string[]} 中文文本数组
  */
 function extractChineseFromLine(line) {
   const texts = [];
+  
+  // 过滤掉 console.log 相关的行
+  if (isConsoleLogLine(line)) {
+    return texts; // 返回空数组，不处理 console.log 中的中文
+  }
   
   // 匹配单引号字符串中的中文
   const singleQuoteRegex = /'([^']*[\u4e00-\u9fff][^']*)'/g;
@@ -164,17 +201,25 @@ function extractChineseFromLine(line) {
   
   // 提取单引号中的中文
   while ((match = singleQuoteRegex.exec(line)) !== null) {
-    const text = match[1].trim();
-    if (isValidChineseText(text)) {
-      texts.push(text);
+    const rawText = match[1].trim();
+    const cleanedSegments = cleanChineseText(rawText); // 清理并分割成多个中文片段
+    // 将每个有效的中文片段添加到结果中
+    for (const segment of cleanedSegments) {
+      if (segment && isValidChineseText(segment)) {
+        texts.push(segment);
+      }
     }
   }
   
   // 提取双引号中的中文
   while ((match = doubleQuoteRegex.exec(line)) !== null) {
-    const text = match[1].trim();
-    if (isValidChineseText(text)) {
-      texts.push(text);
+    const rawText = match[1].trim();
+    const cleanedSegments = cleanChineseText(rawText); // 清理并分割成多个中文片段
+    // 将每个有效的中文片段添加到结果中
+    for (const segment of cleanedSegments) {
+      if (segment && isValidChineseText(segment)) {
+        texts.push(segment);
+      }
     }
   }
   
@@ -184,17 +229,25 @@ function extractChineseFromLine(line) {
     
     // 如果模板字符串不包含表达式，直接处理
     if (!templateContent.includes('${')) {
-      const text = templateContent.trim();
-      if (isValidChineseText(text)) {
-        texts.push(text);
+      const rawText = templateContent.trim();
+      const cleanedSegments = cleanChineseText(rawText); // 清理并分割成多个中文片段
+      // 将每个有效的中文片段添加到结果中
+      for (const segment of cleanedSegments) {
+        if (segment && isValidChineseText(segment)) {
+          texts.push(segment);
+        }
       }
     } else {
       // 如果包含表达式，提取被${}分割的中文片段
       const segments = templateContent.split(/\$\{[^}]*\}/);
       for (const segment of segments) {
-        const text = segment.trim();
-        if (text && isValidChineseText(text)) {
-          texts.push(text);
+        const rawText = segment.trim();
+        const cleanedSegments = cleanChineseText(rawText); // 清理并分割成多个中文片段
+        // 将每个有效的中文片段添加到结果中
+        for (const cleanedSegment of cleanedSegments) {
+          if (cleanedSegment && isValidChineseText(cleanedSegment)) {
+            texts.push(cleanedSegment);
+          }
         }
       }
     }
@@ -270,6 +323,71 @@ function 文本质量评分(text) {
   if (text.endsWith('，') || text.endsWith('、')) score -= 1; // 以逗号结尾
   
   return score;
+}
+
+/**
+ * 增强版中文文本清理函数
+ * 智能处理中文标点符号，进行分割并剔除标点符号
+ * @param {string} text - 原始文本
+ * @returns {string[]} 清理后的纯中文片段数组
+ */
+function cleanChineseText(text) {
+  if (!text) return [];
+  
+  // 第一步：移除所有 emoji 和特殊符号
+  let cleanedText = text
+    // 移除 emoji（各种 Unicode emoji 范围）
+    .replace(/[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F1E0}-\u{1F1FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu, ' ')
+    // 移除常见的特殊符号和图标
+    .replace(/[✅❌⏭️🔍📂📁📄🌐📡📝✨🚀⚠️💡🎯📊🛠️]/g, ' ')
+    // 移除其他常见符号
+    .replace(/[►▶️⭐🎉🔧📈📉💻🖥️📱⌚]/g, ' ')
+    // 移除英文标点符号
+    .replace(/[!@#$%^&*()_+\-=\[\]{}|;':",./<>?`~]/g, ' ');
+
+  // 第二步：先移除首尾的中文标点符号，避免边界问题
+  cleanedText = cleanedText.replace(/^[，。？！；：、·""''（）【】《》〈〉「」『』…——－〔〕〖〗｛｝［］]+/, '');
+  cleanedText = cleanedText.replace(/[，。？！；：、·""''（）【】《》〈〉「」『』…——－〔〕〖〗｛｝［］]+$/, '');
+  
+  // 如果清理后没有中文内容，直接返回空数组
+  if (!cleanedText || !/[\u4e00-\u9fff]/.test(cleanedText)) {
+    return [];
+  }
+  
+  // 第三步：使用正则表达式定义中文标点符号进行分割
+  // 包含所有常见的中文标点符号：，。？！；：、·""''（）【】《》〈〉「」『』…——－〔〕〖〗｛｝［］
+  const chinesePunctuationRegex = /[，。？！；：、·""''（）【】《》〈〉「」『』…——－〔〕〖〗｛｝［］]+/g;
+  
+  // 按标点符号分割文本
+  const segments = cleanedText.split(chinesePunctuationRegex);
+  
+  // 第四步：清理每个片段并过滤
+  const cleanedSegments = segments
+    .map(segment => segment.trim()) // 去除首尾空格
+    .filter(segment => {
+      // 只保留包含中文字符的非空片段
+      return segment && /[\u4e00-\u9fff]/.test(segment);
+    })
+    .map(segment => {
+      // 进一步清理：移除剩余的英文字符、数字和符号
+      return segment
+        .replace(/[a-zA-Z0-9\s]+/g, '') // 移除英文字母、数字和空格
+        .replace(/[\u0000-\u007F]+/g, '') // 移除所有ASCII字符
+        .replace(/^[，。？！；：、·""''（）【】《》〈〉「」『』…——－〔〕〖〗｛｝［］]+/, '') // 再次移除首部标点
+        .replace(/[，。？！；：、·""''（）【】《》〈〉「」『』…——－〔〕〖〗｛｝［］]+$/, '') // 再次移除尾部标点
+        .trim();
+    })
+    .filter(segment => {
+      // 最终过滤：确保片段有效且包含中文
+      return segment && 
+             segment.length > 0 && 
+             /[\u4e00-\u9fff]/.test(segment) &&
+             segment.length <= 20 && // 避免过长的片段
+             !/^[，。？！；：、·""''（）【】《》〈〉「」『』…——－〔〕〖〗｛｝［］]/.test(segment) && // 确保不以标点开头
+             !/[，。？！；：、·""''（）【】《》〈〉「」『』…——－〔〕〖〗｛｝［］]$/.test(segment); // 确保不以标点结尾
+    });
+  
+  return cleanedSegments;
 }
 
 /**
@@ -611,5 +729,10 @@ function generatePlaceholder(chineseText) {
 }
 
 module.exports = {
-  execute
+  execute,
+  extractChineseFromFile,
+  findSourceFiles,
+  loadApiConfig,
+  deduplicateTexts,
+  generateMapping
 };
