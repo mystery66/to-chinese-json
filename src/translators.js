@@ -1,6 +1,7 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const querystring = require('querystring');
+const DoubaoTranslator = require('./translators/doubao-translator');
 
 /**
  * 翻译服务管理器
@@ -10,14 +11,15 @@ class TranslationManager {
     this.translators = {
       baidu: new BaiduTranslator(),
       youdao: new YoudaoTranslator(),
-      google: new GoogleTranslator()
+      google: new GoogleTranslator(),
+      doubao: new DoubaoTranslator()
     };
     this.currentTranslator = 'baidu'; // 默认使用百度翻译
   }
 
   /**
    * 设置当前使用的翻译服务
-   * @param {string} service - 翻译服务名称 (baidu, youdao, google)
+   * @param {string} service - 翻译服务名称 (baidu, youdao, google, doubao)
    */
   setTranslator(service) {
     if (this.translators[service]) {
@@ -344,5 +346,6 @@ module.exports = {
   TranslationManager,
   BaiduTranslator,
   YoudaoTranslator,
-  GoogleTranslator
+  GoogleTranslator,
+  DoubaoTranslator
 };

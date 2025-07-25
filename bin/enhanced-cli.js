@@ -18,7 +18,7 @@ program
   .option('-s, --source <path>', 'Source directory path (default: current directory)', process.cwd())
   .option('-t, --target <path>', 'Target directory path for JSON output')
   .option('-o, --output <filename>', 'Output JSON filename', 'Chinese-To-English.json')
-  .option('--translator <service>', 'Translation service to use (baidu, youdao, google)', 'baidu')
+  .option('--translator <service>', 'Translation service to use (baidu, youdao, google, doubao)', 'baidu')
   .option('--api-config <path>', 'API configuration file path (optional, auto-lookup for api-config.json in project directory)')
   .option('--method <type>', 'Extraction method: ast or regex', 'ast')
   .option('--extract-comments', 'Extract Chinese from comments (AST only)', false)
